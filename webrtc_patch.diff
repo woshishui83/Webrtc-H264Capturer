@@ -1,0 +1,852 @@
+diff --git a/webrtc/examples/peerconnection/client/conductor.cc b/webrtc/examples/peerconnection/client/conductor.cc
+index 8a1b9a2..f9817c3 100644
+--- a/webrtc/examples/peerconnection/client/conductor.cc
++++ b/webrtc/examples/peerconnection/client/conductor.cc
+@@ -18,10 +18,13 @@
+ #include "webrtc/examples/peerconnection/client/defaults.h"
+ #include "webrtc/media/engine/webrtcvideocapturerfactory.h"
+ #include "webrtc/modules/video_capture/video_capture_factory.h"
++#include "webrtc/modules/video_coding/codecs/h264/h264_encoder_impl.h"
+ #include "webrtc/rtc_base/checks.h"
+ #include "webrtc/rtc_base/json.h"
+ #include "webrtc/rtc_base/logging.h"
+ 
++#include "webrtc/examples/peerconnection/client/h264videocapturer.h"
++
+ // Names used for a IceCandidate JSON object.
+ const char kCandidateSdpMidName[] = "sdpMid";
+ const char kCandidateSdpMlineIndexName[] = "sdpMLineIndex";
+@@ -34,6 +37,14 @@ const char kSessionDescriptionSdpName[] = "sdp";
+ #define DTLS_ON  true
+ #define DTLS_OFF false
+ 
++void RemoveLine(std::string& source, const std::string& to_remove, int offset)
++{
++  size_t nFPos = source.find(to_remove,offset);
++  size_t secondNL = source.find('\n', nFPos);
++  size_t firstNL = source.rfind('\n', nFPos);
++  source.erase(firstNL, secondNL - firstNL);
++}
++
+ class DummySetSessionDescriptionObserver
+     : public webrtc::SetSessionDescriptionObserver {
+  public:
+@@ -127,7 +138,7 @@ bool Conductor::CreatePeerConnection(bool dtls) {
+     constraints.AddOptional(webrtc::MediaConstraintsInterface::kEnableDtlsSrtp,
+                             "false");
+   }
+-
++  constraints.SetMandatoryReceiveVideo(false);
+   peer_connection_ = peer_connection_factory_->CreatePeerConnection(
+       config, &constraints, NULL, NULL, this);
+   return peer_connection_.get() != NULL;
+@@ -233,6 +244,31 @@ void Conductor::OnMessageFromPeer(int peer_id, const std::string& message) {
+   RTC_DCHECK(peer_id_ == peer_id || peer_id_ == -1);
+   RTC_DCHECK(!message.empty());
+ 
++  Json::Reader reader;
++  Json::Value jmessage;
++  if (!reader.parse(message, jmessage)) {
++    LOG(WARNING) << "Received unknown message. " << message;
++    return;
++  }
++  std::string type;
++  std::string json_object;
++
++  rtc::GetStringFromJsonObject(jmessage, kSessionDescriptionTypeName, &type);
++
++   /********************* Messages that do not need any connection **************/
++      if (!type.empty()) {
++          if (type == "pleaseCallMe" ) {
++              LOG(INFO) << "Peer id: " << peer_id;
++               LOG(INFO) << "Peer id_: " << peer_id_;
++              //std::cout << "Please Call me";
++              ConnectToPeer(peer_id);
++                    return;
++          }
++      }
++
++
++  /******************************************************************************/
++
+   if (!peer_connection_.get()) {
+     RTC_DCHECK(peer_id_ == -1);
+     peer_id_ = peer_id;
+@@ -249,16 +285,6 @@ void Conductor::OnMessageFromPeer(int peer_id, const std::string& message) {
+     return;
+   }
+ 
+-  Json::Reader reader;
+-  Json::Value jmessage;
+-  if (!reader.parse(message, jmessage)) {
+-    LOG(WARNING) << "Received unknown message. " << message;
+-    return;
+-  }
+-  std::string type;
+-  std::string json_object;
+-
+-  rtc::GetStringFromJsonObject(jmessage, kSessionDescriptionTypeName, &type);
+   if (!type.empty()) {
+     if (type == "offer-loopback") {
+       // This is a loopback call.
+@@ -336,10 +362,11 @@ void Conductor::OnServerConnectionFailure() {
+ // MainWndCallback implementation.
+ //
+ 
+-void Conductor::StartLogin(const std::string& server, int port) {
++void Conductor::StartLogin(const std::string& server, int port, const std::string& video_url) {
+   if (client_->is_connected())
+     return;
+   server_ = server;
++  video_url_ = video_url;
+   client_->Connect(server, port, GetPeerName());
+ }
+ 
+@@ -360,7 +387,10 @@ void Conductor::ConnectToPeer(int peer_id) {
+ 
+   if (InitializePeerConnection()) {
+     peer_id_ = peer_id;
+-    peer_connection_->CreateOffer(this, NULL);
++  webrtc::FakeConstraints constraints;
++  constraints.SetMandatoryMaxFrameRate(60);
++  constraints.SetMandatoryReceiveVideo(false);
++    peer_connection_->CreateOffer(this, &constraints);
+   } else {
+     main_wnd_->MessageBox("Error", "Failed to initialize PeerConnection", true);
+   }
+@@ -400,21 +430,29 @@ void Conductor::AddStreams() {
+   if (active_streams_.find(kStreamLabel) != active_streams_.end())
+     return;  // Already added.
+ 
++#if 0
+   rtc::scoped_refptr<webrtc::AudioTrackInterface> audio_track(
+       peer_connection_factory_->CreateAudioTrack(
+           kAudioLabel, peer_connection_factory_->CreateAudioSource(NULL)));
++#endif
++  webrtc::FakeConstraints constraints;
++  constraints.SetMandatoryMaxFrameRate(60);
++  constraints.SetMandatoryReceiveVideo(false);
++
++  cricket::VideoCapturer* capturer = NULL;
++  capturer = new RawVideoCapturer(video_url_);
+ 
+   rtc::scoped_refptr<webrtc::VideoTrackInterface> video_track(
+       peer_connection_factory_->CreateVideoTrack(
+           kVideoLabel,
+-          peer_connection_factory_->CreateVideoSource(OpenVideoCaptureDevice(),
++          peer_connection_factory_->CreateVideoSource(/*OpenVideoCaptureDevice()*/capturer,
+                                                       NULL)));
+   main_wnd_->StartLocalRenderer(video_track);
+ 
+   rtc::scoped_refptr<webrtc::MediaStreamInterface> stream =
+       peer_connection_factory_->CreateLocalMediaStream(kStreamLabel);
+ 
+-  stream->AddTrack(audio_track);
++  //stream->AddTrack(audio_track);
+   stream->AddTrack(video_track);
+   if (!peer_connection_->AddStream(stream)) {
+     LOG(LS_ERROR) << "Adding stream to PeerConnection failed";
+@@ -519,6 +557,18 @@ void Conductor::OnSuccess(webrtc::SessionDescriptionInterface* desc) {
+   std::string sdp;
+   desc->ToString(&sdp);
+ 
++#if 0
++  while(sdp.find("nack",0)!=std::string::npos){
++      RemoveLine(sdp,"nack",0);
++  }
++  while(sdp.find("fir",0)!=std::string::npos){
++      RemoveLine(sdp,"fir",0);
++  }
++  while(sdp.find("remb",0)!=std::string::npos){
++      RemoveLine(sdp,"remb",0);
++  }
++#endif
++
+   // For loopback test. To save some connecting delay.
+   if (loopback_) {
+     // Replace message type from "offer" to "answer"
+diff --git a/webrtc/examples/peerconnection/client/conductor.h b/webrtc/examples/peerconnection/client/conductor.h
+index 0041a9b..7e49201 100644
+--- a/webrtc/examples/peerconnection/client/conductor.h
++++ b/webrtc/examples/peerconnection/client/conductor.h
+@@ -102,7 +102,7 @@ class Conductor
+   // MainWndCallback implementation.
+   //
+ 
+-  void StartLogin(const std::string& server, int port) override;
++  void StartLogin(const std::string& server, int port, const std::string& video_url) override;
+ 
+   void DisconnectFromServer() override;
+ 
+@@ -131,6 +131,7 @@ class Conductor
+   std::map<std::string, rtc::scoped_refptr<webrtc::MediaStreamInterface> >
+       active_streams_;
+   std::string server_;
++  std::string video_url_;
+ };
+ 
+ #endif  // WEBRTC_EXAMPLES_PEERCONNECTION_CLIENT_CONDUCTOR_H_
+diff --git a/webrtc/examples/peerconnection/client/flagdefs.h b/webrtc/examples/peerconnection/client/flagdefs.h
+index f3dda76..3331e71 100644
+--- a/webrtc/examples/peerconnection/client/flagdefs.h
++++ b/webrtc/examples/peerconnection/client/flagdefs.h
+@@ -28,5 +28,6 @@ DEFINE_int(port, kDefaultServerPort,
+ DEFINE_bool(autocall, false, "Call the first available other client on "
+   "the server without user intervention.  Note: this flag should only be set "
+   "to true on one of the two clients.");
++DEFINE_string(video_url, "parking_264.mpeg", "The URL to get an H264 video stream.");
+ 
+ #endif  // WEBRTC_EXAMPLES_PEERCONNECTION_CLIENT_FLAGDEFS_H_
+diff --git a/webrtc/examples/peerconnection/client/linux/main.cc b/webrtc/examples/peerconnection/client/linux/main.cc
+index d57bc98..1ceed0e 100644
+--- a/webrtc/examples/peerconnection/client/linux/main.cc
++++ b/webrtc/examples/peerconnection/client/linux/main.cc
+@@ -8,7 +8,7 @@
+  *  be found in the AUTHORS file in the root of the source tree.
+  */
+ 
+-#include <gtk/gtk.h>
++//#include <gtk/gtk.h>
+ 
+ #include "webrtc/examples/peerconnection/client/conductor.h"
+ #include "webrtc/examples/peerconnection/client/flagdefs.h"
+@@ -38,14 +38,16 @@ class CustomSocketServer : public rtc::PhysicalSocketServer {
+     // different thread.  Alternatively we could look at merging the two loops
+     // by implementing a dispatcher for the socket server and/or use
+     // g_main_context_set_poll_func.
+-      while (gtk_events_pending())
+-        gtk_main_iteration();
+-
++      //while (gtk_events_pending())
++        //printf("~~~~~~~~~~~~~~~~~~~~~~~ /n");
++        //gtk_main_iteration();
++#if 0
+     if (!wnd_->IsWindow() && !conductor_->connection_active() &&
+         client_ != NULL && !client_->is_connected()) {
+-      message_queue_->Quit();
++      //message_queue_->Quit();
+     }
+-    return rtc::PhysicalSocketServer::Wait(0/*cms == -1 ? 1 : cms*/,
++#endif
++    return rtc::PhysicalSocketServer::Wait(0/*cms == -1 ? 1000 : cms*/,
+                                                  process_io);
+   }
+ 
+@@ -57,6 +59,7 @@ class CustomSocketServer : public rtc::PhysicalSocketServer {
+ };
+ 
+ int main(int argc, char* argv[]) {
++#if 0
+   gtk_init(&argc, &argv);
+   // g_type_init API is deprecated (and does nothing) since glib 2.35.0, see:
+   // https://mail.gnome.org/archives/commits-list/2012-November/msg07809.html
+@@ -68,6 +71,7 @@ int main(int argc, char* argv[]) {
+ #if !GLIB_CHECK_VERSION(2, 31, 0)
+     g_thread_init(NULL);
+ #endif
++#endif
+ 
+   rtc::FlagList::SetFlagsFromCommandLine(&argc, argv, true);
+   if (FLAG_help) {
+@@ -82,10 +86,10 @@ int main(int argc, char* argv[]) {
+     return -1;
+   }
+ 
+-  GtkMainWnd wnd(FLAG_server, FLAG_port, FLAG_autoconnect, FLAG_autocall);
+-  wnd.Create();
++  GtkMainWnd wnd(FLAG_server, FLAG_video_url,FLAG_port, FLAG_autoconnect, FLAG_autocall);
++  //wnd.Create();
+ 
+-  CustomSocketServer socket_server(&wnd);
++  CustomSocketServer socket_server(/*&wnd*/NULL);
+   rtc::AutoSocketServerThread thread(&socket_server);
+ 
+   rtc::InitializeSSL();
+@@ -103,9 +107,9 @@ int main(int argc, char* argv[]) {
+ 
+   // TODO(henrike): Run the Gtk main loop to tear down the connection.
+   /*
+-  while (gtk_events_pending()) {
+-    gtk_main_iteration();
+-  }
++  //while (gtk_events_pending()) {
++   // gtk_main_iteration();
++  //}
+   */
+   rtc::CleanupSSL();
+   return 0;
+diff --git a/webrtc/examples/peerconnection/client/linux/main_wnd.cc b/webrtc/examples/peerconnection/client/linux/main_wnd.cc
+index d9f32bc..1ab5e14 100644
+--- a/webrtc/examples/peerconnection/client/linux/main_wnd.cc
++++ b/webrtc/examples/peerconnection/client/linux/main_wnd.cc
+@@ -10,8 +10,8 @@
+ 
+ #include "webrtc/examples/peerconnection/client/linux/main_wnd.h"
+ 
+-#include <gdk/gdkkeysyms.h>
+-#include <gtk/gtk.h>
++//#include <gdk/gdkkeysyms.h>
++//#include <gtk/gtk.h>
+ #include <stddef.h>
+ 
+ #include "libyuv/convert_from.h"
+@@ -29,7 +29,7 @@ namespace {
+ // Simple static functions that simply forward the callback to the
+ // GtkMainWnd instance.
+ //
+-
++#if 0
+ gboolean OnDestroyedCallback(GtkWidget* widget, GdkEvent* event,
+                              gpointer data) {
+   reinterpret_cast<GtkMainWnd*>(data)->OnDestroyed(widget, event);
+@@ -97,7 +97,7 @@ void AddToList(GtkWidget* list, const gchar* str, int value) {
+   gtk_list_store_append(store, &iter);
+   gtk_list_store_set(store, &iter, 0, str, 1, value, -1);
+ }
+-
++#endif
+ struct UIThreadCallbackData {
+   explicit UIThreadCallbackData(MainWndCallback* cb, int id, void* d)
+       : callback(cb), msg_id(id), data(d) {}
+@@ -106,13 +106,14 @@ struct UIThreadCallbackData {
+   void* data;
+ };
+ 
+-gboolean HandleUIThreadCallback(gpointer data) {
++bool HandleUIThreadCallback(void* data) {
+   UIThreadCallbackData* cb_data = reinterpret_cast<UIThreadCallbackData*>(data);
+   cb_data->callback->UIThreadCallback(cb_data->msg_id, cb_data->data);
+   delete cb_data;
+   return false;
+ }
+ 
++#if 0
+ gboolean Redraw(gpointer data) {
+   GtkMainWnd* wnd = reinterpret_cast<GtkMainWnd*>(data);
+   wnd->OnRedraw();
+@@ -124,6 +125,7 @@ gboolean Draw(GtkWidget* widget, cairo_t* cr, gpointer data) {
+   wnd->Draw(widget, cr);
+   return false;
+ }
++#endif
+ 
+ }  // namespace
+ 
+@@ -131,11 +133,11 @@ gboolean Draw(GtkWidget* widget, cairo_t* cr, gpointer data) {
+ // GtkMainWnd implementation.
+ //
+ 
+-GtkMainWnd::GtkMainWnd(const char* server, int port, bool autoconnect,
++GtkMainWnd::GtkMainWnd(const char* server, const char* video_url, int port, bool autoconnect,
+                        bool autocall)
+     : window_(NULL), draw_area_(NULL), vbox_(NULL), server_edit_(NULL),
+       port_edit_(NULL), peer_list_(NULL), callback_(NULL),
+-      server_(server), autoconnect_(autoconnect), autocall_(autocall) {
++      server_(server), video_url_(video_url), autoconnect_(autoconnect), autocall_(autocall) {
+   char buffer[10];
+   sprintfn(buffer, sizeof(buffer), "%i", port);
+   port_ = buffer;
+@@ -147,14 +149,16 @@ GtkMainWnd::~GtkMainWnd() {
+ 
+ void GtkMainWnd::RegisterObserver(MainWndCallback* callback) {
+   callback_ = callback;
++  callback_->StartLogin(server_, atoi(port_.c_str()), video_url_);
+ }
+ 
+ bool GtkMainWnd::IsWindow() {
+-  return window_ != NULL && GTK_IS_WINDOW(window_);
++  return 0;//window_ != NULL && GTK_IS_WINDOW(window_);
+ }
+ 
+ void GtkMainWnd::MessageBox(const char* caption, const char* text,
+                             bool is_error) {
++#if 0
+   GtkWidget* dialog = gtk_message_dialog_new(GTK_WINDOW(window_),
+       GTK_DIALOG_DESTROY_WITH_PARENT,
+       is_error ? GTK_MESSAGE_ERROR : GTK_MESSAGE_INFO,
+@@ -162,6 +166,7 @@ void GtkMainWnd::MessageBox(const char* caption, const char* text,
+   gtk_window_set_title(GTK_WINDOW(dialog), caption);
+   gtk_dialog_run(GTK_DIALOG(dialog));
+   gtk_widget_destroy(dialog);
++#endif
+ }
+ 
+ MainWindow::UI GtkMainWnd::current_ui() {
+@@ -193,11 +198,13 @@ void GtkMainWnd::StopRemoteRenderer() {
+ }
+ 
+ void GtkMainWnd::QueueUIThreadCallback(int msg_id, void* data) {
+-  g_idle_add(HandleUIThreadCallback,
+-             new UIThreadCallbackData(callback_, msg_id, data));
++ /* g_idle_add(HandleUIThreadCallback,
++             new UIThreadCallbackData(callback_, msg_id, data));*/
++    HandleUIThreadCallback(new UIThreadCallbackData(callback_, msg_id, data));
+ }
+ 
+ bool GtkMainWnd::Create() {
++#if 0
+   RTC_DCHECK(window_ == NULL);
+ 
+   window_ = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+@@ -212,7 +219,7 @@ bool GtkMainWnd::Create() {
+ 
+     SwitchToConnectUI();
+   }
+-
++#endif
+   return window_ != NULL;
+ }
+ 
+@@ -220,13 +227,14 @@ bool GtkMainWnd::Destroy() {
+   if (!IsWindow())
+     return false;
+ 
+-  gtk_widget_destroy(window_);
++  //gtk_widget_destroy(window_);
+   window_ = NULL;
+ 
+   return true;
+ }
+ 
+ void GtkMainWnd::SwitchToConnectUI() {
++#if 0
+   LOG(INFO) << __FUNCTION__;
+ 
+   RTC_DCHECK(IsWindow());
+@@ -280,9 +288,11 @@ void GtkMainWnd::SwitchToConnectUI() {
+ 
+   if (autoconnect_)
+     g_idle_add(SimulateButtonClick, button);
++#endif
+ }
+ 
+ void GtkMainWnd::SwitchToPeerList(const Peers& peers) {
++#if 0
+   LOG(INFO) << __FUNCTION__;
+ 
+   if (!peer_list_) {
+@@ -317,9 +327,11 @@ void GtkMainWnd::SwitchToPeerList(const Peers& peers) {
+ 
+   if (autocall_ && peers.begin() != peers.end())
+     g_idle_add(SimulateLastRowActivated, peer_list_);
++#endif
+ }
+ 
+ void GtkMainWnd::SwitchToStreamingUI() {
++#if 0
+   LOG(INFO) << __FUNCTION__;
+ 
+   RTC_DCHECK(draw_area_ == NULL);
+@@ -335,8 +347,10 @@ void GtkMainWnd::SwitchToStreamingUI() {
+   g_signal_connect(G_OBJECT(draw_area_), "draw", G_CALLBACK(&::Draw), this);
+ 
+   gtk_widget_show_all(window_);
++#endif
+ }
+ 
++#if 0
+ void GtkMainWnd::OnDestroyed(GtkWidget* widget, GdkEvent* event) {
+   callback_->Close();
+   window_ = NULL;
+@@ -355,7 +369,7 @@ void GtkMainWnd::OnClicked(GtkWidget* widget) {
+   server_ = gtk_entry_get_text(GTK_ENTRY(server_edit_));
+   port_ = gtk_entry_get_text(GTK_ENTRY(port_edit_));
+   int port = port_.length() ? atoi(port_.c_str()) : 0;
+-  callback_->StartLogin(server_, port);
++  callback_->StartLogin(server_, port, video_url_);
+ }
+ 
+ void GtkMainWnd::OnKeyPress(GtkWidget* widget, GdkEventKey* key) {
+@@ -491,6 +505,7 @@ void GtkMainWnd::Draw(GtkWidget* widget, cairo_t* cr) {
+   RTC_NOTREACHED();
+ #endif
+ }
++#endif
+ 
+ GtkMainWnd::VideoRenderer::VideoRenderer(
+     GtkMainWnd* main_wnd,
+@@ -507,7 +522,7 @@ GtkMainWnd::VideoRenderer::~VideoRenderer() {
+ }
+ 
+ void GtkMainWnd::VideoRenderer::SetSize(int width, int height) {
+-  gdk_threads_enter();
++  //gdk_threads_enter();
+ 
+   if (width_ == width && height_ == height) {
+     return;
+@@ -516,11 +531,12 @@ void GtkMainWnd::VideoRenderer::SetSize(int width, int height) {
+   width_ = width;
+   height_ = height;
+   image_.reset(new uint8_t[width * height * 4]);
+-  gdk_threads_leave();
++  //gdk_threads_leave();
+ }
+ 
+ void GtkMainWnd::VideoRenderer::OnFrame(
+     const webrtc::VideoFrame& video_frame) {
++ #if 0
+   gdk_threads_enter();
+ 
+   rtc::scoped_refptr<webrtc::I420BufferInterface> buffer(
+@@ -545,4 +561,5 @@ void GtkMainWnd::VideoRenderer::OnFrame(
+   gdk_threads_leave();
+ 
+   g_idle_add(Redraw, main_wnd_);
++#endif
+ }
+diff --git a/webrtc/examples/peerconnection/client/linux/main_wnd.h b/webrtc/examples/peerconnection/client/linux/main_wnd.h
+index 68ed8bf..182060a 100644
+--- a/webrtc/examples/peerconnection/client/linux/main_wnd.h
++++ b/webrtc/examples/peerconnection/client/linux/main_wnd.h
+@@ -31,7 +31,7 @@ typedef struct _cairo cairo_t;
+ // implementation.
+ class GtkMainWnd : public MainWindow {
+  public:
+-  GtkMainWnd(const char* server, int port, bool autoconnect, bool autocall);
++  GtkMainWnd(const char* server,const char* video_url, int port, bool autoconnect, bool autocall);
+   ~GtkMainWnd();
+ 
+   virtual void RegisterObserver(MainWndCallback* callback);
+@@ -112,6 +112,7 @@ class GtkMainWnd : public MainWindow {
+   GtkWidget* peer_list_;  // The list of peers.
+   MainWndCallback* callback_;
+   std::string server_;
++  std::string video_url_;
+   std::string port_;
+   bool autoconnect_;
+   bool autocall_;
+diff --git a/webrtc/examples/peerconnection/client/main_wnd.h b/webrtc/examples/peerconnection/client/main_wnd.h
+index 18f56a7..8ba6518 100644
+--- a/webrtc/examples/peerconnection/client/main_wnd.h
++++ b/webrtc/examples/peerconnection/client/main_wnd.h
+@@ -24,7 +24,7 @@
+ 
+ class MainWndCallback {
+  public:
+-  virtual void StartLogin(const std::string& server, int port) = 0;
++  virtual void StartLogin(const std::string& server, int port, const std::string& video_url) = 0;
+   virtual void DisconnectFromServer() = 0;
+   virtual void ConnectToPeer(int peer_id) = 0;
+   virtual void DisconnectFromCurrentPeer() = 0;
+diff --git a/webrtc/media/engine/webrtcvideoengine.cc b/webrtc/media/engine/webrtcvideoengine.cc
+index 2904bcb..d3fd5bf 100644
+--- a/webrtc/media/engine/webrtcvideoengine.cc
++++ b/webrtc/media/engine/webrtcvideoengine.cc
+@@ -192,7 +192,7 @@ int GetDefaultVp9TemporalLayers() {
+ 
+ // Constants defined in webrtc/media/engine/constants.h
+ // TODO(pbos): Move these to a separate constants.cc file.
+-const int kMinVideoBitrateKbps = 30;
++const int kMinVideoBitrateKbps = 30000;
+ 
+ const int kVideoMtu = 1200;
+ const int kVideoRtpBufferSize = 65536;
+@@ -406,6 +406,7 @@ static rtc::Optional<int> NextFreePayloadType(
+ static void AppendVideoCodecs(const std::vector<VideoCodec>& input_codecs,
+                               std::vector<VideoCodec>* unified_codecs) {
+   for (VideoCodec codec : input_codecs) {
++  if( codec.name == kH264CodecName ){
+     const rtc::Optional<int> payload_type =
+         NextFreePayloadType(*unified_codecs);
+     if (!payload_type)
+@@ -437,6 +438,7 @@ static void AppendVideoCodecs(const std::vector<VideoCodec>& input_codecs,
+           VideoCodec::CreateRtxCodec(*rtx_payload_type, codec.id));
+     }
+   }
++  }
+ }
+ 
+ static std::vector<VideoCodec> GetSupportedCodecs(
+diff --git a/webrtc/modules/video_coding/codecs/h264/h264_decoder_impl.cc b/webrtc/modules/video_coding/codecs/h264/h264_decoder_impl.cc
+index 290df94..e6b7133 100644
+--- a/webrtc/modules/video_coding/codecs/h264/h264_decoder_impl.cc
++++ b/webrtc/modules/video_coding/codecs/h264/h264_decoder_impl.cc
+@@ -80,7 +80,9 @@ void InitializeFFmpeg() {
+       RTC_NOTREACHED() << "av_lockmgr_register failed.";
+       return;
+     }
++    avcodec_register_all();
+     av_register_all();
++    avformat_network_init();
+     ffmpeg_initialized = true;
+   }
+ }
+@@ -89,6 +91,10 @@ void InitializeFFmpeg() {
+ 
+ }  // namespace
+ 
++void H264DecoderImpl::InitFFmpeg() {
++  InitializeFFmpeg();
++}
++
+ int H264DecoderImpl::AVGetBuffer2(
+     AVCodecContext* context, AVFrame* av_frame, int flags) {
+   // Set in |InitDecode|.
+diff --git a/webrtc/modules/video_coding/codecs/h264/h264_decoder_impl.h b/webrtc/modules/video_coding/codecs/h264/h264_decoder_impl.h
+index 44c2acb..e2138d2 100644
+--- a/webrtc/modules/video_coding/codecs/h264/h264_decoder_impl.h
++++ b/webrtc/modules/video_coding/codecs/h264/h264_decoder_impl.h
+@@ -54,6 +54,7 @@ class H264DecoderImpl : public H264Decoder {
+                  int64_t render_time_ms = -1) override;
+ 
+   const char* ImplementationName() const override;
++  void InitFFmpeg();
+ 
+  private:
+   // Called by FFmpeg when it needs a frame buffer to store decoded frames in.
+diff --git a/webrtc/modules/video_coding/codecs/h264/h264_encoder_impl.cc b/webrtc/modules/video_coding/codecs/h264/h264_encoder_impl.cc
+index f5a1910..b6cdc7f 100644
+--- a/webrtc/modules/video_coding/codecs/h264/h264_encoder_impl.cc
++++ b/webrtc/modules/video_coding/codecs/h264/h264_encoder_impl.cc
+@@ -11,6 +11,8 @@
+ 
+ #include "webrtc/modules/video_coding/codecs/h264/h264_encoder_impl.h"
+ 
++#include "webrtc/common_video/h264/h264_common.h"
++
+ #include <limits>
+ #include <string>
+ 
+@@ -55,6 +57,7 @@ int NumberOfThreads(int width, int height, int number_of_cores) {
+   return 1;
+ }
+ 
++#if 0
+ FrameType ConvertToVideoFrameType(EVideoFrameType type) {
+   switch (type) {
+     case videoFrameTypeIDR:
+@@ -70,6 +73,7 @@ FrameType ConvertToVideoFrameType(EVideoFrameType type) {
+   RTC_NOTREACHED() << "Unexpected/invalid frame type: " << type;
+   return kEmptyFrame;
+ }
++#endif
+ 
+ }  // namespace
+ 
+@@ -84,6 +88,7 @@ FrameType ConvertToVideoFrameType(EVideoFrameType type) {
+ // start codes) is copied to the |encoded_image->_buffer| and the |frag_header|
+ // is updated to point to each fragment, with offsets and lengths set as to
+ // exclude the start codes.
++#if 0
+ static void RtpFragmentize(EncodedImage* encoded_image,
+                            std::unique_ptr<uint8_t[]>* encoded_image_buffer,
+                            const VideoFrameBuffer& frame_buffer,
+@@ -151,6 +156,7 @@ static void RtpFragmentize(EncodedImage* encoded_image,
+     encoded_image->_length += layer_len;
+   }
+ }
++#endif
+ 
+ H264EncoderImpl::H264EncoderImpl(const cricket::VideoCodec& codec)
+     : openh264_encoder_(nullptr),
+@@ -314,7 +320,7 @@ int32_t H264EncoderImpl::Encode(const VideoFrame& input_frame,
+     ReportError();
+     return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
+   }
+-
++#if 0
+   bool force_key_frame = false;
+   if (frame_types != nullptr) {
+     // We only support a single stream.
+@@ -360,7 +366,9 @@ int32_t H264EncoderImpl::Encode(const VideoFrame& input_frame,
+     ReportError();
+     return WEBRTC_VIDEO_CODEC_ERROR;
+   }
+-
++#endif
++  rtc::scoped_refptr<const VideoFrameBuffer> frame_buffer = input_frame.video_frame_buffer();
++  rtc::scoped_refptr<const I420BufferInterface> I420_interf = frame_buffer->GetI420();
+   encoded_image_._encodedWidth = frame_buffer->width();
+   encoded_image_._encodedHeight = frame_buffer->height();
+   encoded_image_._timeStamp = input_frame.timestamp();
+@@ -371,21 +379,103 @@ int32_t H264EncoderImpl::Encode(const VideoFrame& input_frame,
+                                      ? VideoContentType::SCREENSHARE
+                                      : VideoContentType::UNSPECIFIED;
+   encoded_image_.timing_.flags = TimingFrameFlags::kInvalid;
+-  encoded_image_._frameType = ConvertToVideoFrameType(info.eFrameType);
++  //encoded_image_._frameType = ConvertToVideoFrameType(info.eFrameType);
+ 
+   // Split encoded image up into fragments. This also updates |encoded_image_|.
+   RTPFragmentationHeader frag_header;
++#if 0
+   RtpFragmentize(&encoded_image_, &encoded_image_buffer_, *frame_buffer, &info,
+                  &frag_header);
++#else
++  uint8_t * p_nal = const_cast<uint8_t*>(I420_interf->DataY())+5;
++  uint32_t * p_size;
++  uint8_t * p_prio;
++  uint8_t new_prio = 0x03; // priority is set to 3 by default
++  int i_nal ;
++  static int fr_num = 0;
++  std::vector<H264::NaluIndex> NALUidx;
++  p_size = (uint32_t*)(I420_interf->DataY()) ;
++  p_prio = (uint8_t*)(I420_interf->DataY()) +4 ; //&new_prio
++  new_prio = p_prio[0];
++
++
++  NALUidx = H264::FindNaluIndices(p_nal , p_size[0]); 
++  i_nal = NALUidx.size();
++    //if( i_nal > 2 )
++    //  NALUidx[i_nal-1].payload_size = p_size[0]  -  NALUidx[i_nal-1].payload_start_offset ;
++  for (int nal_index = 0; nal_index < i_nal ; nal_index++)
++  {
++    uint8_t nal =  p_nal[NALUidx[nal_index].payload_start_offset] ;
++    if( nal == 0x09 ){ // remove NALU delimiters...
++      NALUidx.erase (NALUidx.begin()+nal_index);
++    }
++      
++  }
++  i_nal = NALUidx.size();
++  frag_header.VerifyAndAllocateFragmentationHeader(i_nal);
++  //debug gdb: x/100bx p_nal
++  encoded_image_._length = 0;
++
++  uint32_t totalNaluIndex = 0;
++  
++  for (int nal_index = 0; nal_index < i_nal ; nal_index++)
++  {
++    uint32_t currentNaluSize = 0;
++
++    uint8_t nal =  p_nal[NALUidx[nal_index].payload_start_offset] ;
++    //if( nal == 0x09 ){
++    //  totalNaluIndex++;
++    //  continue;
++    //}
++
++    if(p_prio[0] < 3)
++    {
++  //  uint32_t type = nal&0x1F;
++    uint8_t ref_idc = (nal >>5)&0x03;
++
++    if(ref_idc == 0  )
++    {
++        new_prio = (p_prio[0]+2)%4;
++
++    }
++    uint8_t nri_mask = (  new_prio << 5 ) & 0x60;
++    p_nal[NALUidx[nal_index].payload_start_offset] = (p_nal[NALUidx[nal_index].payload_start_offset] & 0x9F) | nri_mask;
++    nal =  p_nal[NALUidx[nal_index].payload_start_offset] ;
++    ref_idc = (nal >>5)&0x03;
++
++    }
++	//  break;//p_nal[NALUidx[nal_index].payload_start_offset] = 0x01;
++
++  //  printf("%02x -- %02x \n",nal, type);
++    currentNaluSize = NALUidx[nal_index].payload_size; //i_frame_size
++
++     //   printf("%02x -- %02x ---%u \n",nal, type, currentNaluSize);
++  	memcpy(encoded_image_._buffer + encoded_image_._length, &p_nal[NALUidx[nal_index].payload_start_offset] , currentNaluSize);//will add start code automatically
++  	encoded_image_._length += currentNaluSize;
++
++  	frag_header.fragmentationOffset[totalNaluIndex] = encoded_image_._length - currentNaluSize;
++  	frag_header.fragmentationLength[totalNaluIndex] = currentNaluSize;
++  	frag_header.fragmentationPlType[totalNaluIndex] = H264::ParseNaluType(p_nal[NALUidx[nal_index].payload_start_offset]);
++  	frag_header.fragmentationTimeDiff[totalNaluIndex] = 0;
+ 
++    //printf("%04x",frag_header.fragmentationPlType[totalNaluIndex]);
++    //printf("\n");
++
++  	totalNaluIndex++;
++
++  }
++  fr_num++;
++
++#endif
+   // Encoder can skip frames to save bandwidth in which case
+   // |encoded_image_._length| == 0.
+   if (encoded_image_._length > 0) {
++#if 0
+     // Parse QP.
+     h264_bitstream_parser_.ParseBitstream(encoded_image_._buffer,
+                                           encoded_image_._length);
+     h264_bitstream_parser_.GetLastSliceQp(&encoded_image_.qp_);
+-
++#endif
+     // Deliver encoded image.
+     CodecSpecificInfo codec_specific;
+     codec_specific.codecType = kVideoCodecH264;
+@@ -430,7 +520,7 @@ SEncParamExt H264EncoderImpl::CreateEncoderParams() const {
+ 
+   // The following parameters are extension parameters (they're in SEncParamExt,
+   // not in SEncParamBase).
+-  encoder_params.bEnableFrameSkip = frame_dropping_on_;
++  encoder_params.bEnableFrameSkip = false;//frame_dropping_on_;
+   // |uiIntraPeriod|    - multiple of GOP size
+   // |keyFrameInterval| - number of frames
+   encoder_params.uiIntraPeriod = key_frame_interval_;
+@@ -447,8 +537,7 @@ SEncParamExt H264EncoderImpl::CreateEncoderParams() const {
+   encoder_params.sSpatialLayers[0].fFrameRate = encoder_params.fMaxFrameRate;
+   encoder_params.sSpatialLayers[0].iSpatialBitrate =
+       encoder_params.iTargetBitrate;
+-  encoder_params.sSpatialLayers[0].iMaxSpatialBitrate =
+-      encoder_params.iMaxBitrate;
++  encoder_params.sSpatialLayers[0].iMaxSpatialBitrate = 40000000;// encoder_params.iMaxBitrate;
+   LOG(INFO) << "OpenH264 version is " << OPENH264_MAJOR << "."
+             << OPENH264_MINOR;
+   switch (packetization_mode_) {
+diff --git a/webrtc/modules/video_coding/codecs/vp8/vp8_impl.cc b/webrtc/modules/video_coding/codecs/vp8/vp8_impl.cc
+index 3bf85d5..0987717 100644
+--- a/webrtc/modules/video_coding/codecs/vp8/vp8_impl.cc
++++ b/webrtc/modules/video_coding/codecs/vp8/vp8_impl.cc
+@@ -289,9 +289,9 @@ int VP8EncoderImpl::SetRateAllocation(const BitrateAllocation& bitrate,
+   // At this point, bitrate allocation should already match codec settings.
+   if (codec_.maxBitrate > 0)
+     RTC_DCHECK_LE(bitrate.get_sum_kbps(), codec_.maxBitrate);
+-  RTC_DCHECK_GE(bitrate.get_sum_kbps(), codec_.minBitrate);
++  //RTC_DCHECK_GE(bitrate.get_sum_kbps(), codec_.minBitrate);
+   if (codec_.numberOfSimulcastStreams > 0)
+-    RTC_DCHECK_GE(bitrate.get_sum_kbps(), codec_.simulcastStream[0].minBitrate);
++    //RTC_DCHECK_GE(bitrate.get_sum_kbps(), codec_.simulcastStream[0].minBitrate);
+ 
+   codec_.maxFramerate = new_framerate;
+ 
+diff --git a/webrtc/modules/video_coding/video_codec_initializer.cc b/webrtc/modules/video_coding/video_codec_initializer.cc
+index d274bf1..d87750c 100644
+--- a/webrtc/modules/video_coding/video_codec_initializer.cc
++++ b/webrtc/modules/video_coding/video_codec_initializer.cc
+@@ -202,7 +202,7 @@ VideoCodec VideoCodecInitializer::VideoEncoderConfigToVideoCodec(
+       RTC_DCHECK_EQ(streams[i].max_framerate, streams[0].max_framerate);
+     }
+     RTC_DCHECK_GE(streams[i].min_bitrate_bps, 0);
+-    RTC_DCHECK_GE(streams[i].target_bitrate_bps, streams[i].min_bitrate_bps);
++    //RTC_DCHECK_GE(streams[i].target_bitrate_bps, streams[i].min_bitrate_bps);
+     RTC_DCHECK_GE(streams[i].max_bitrate_bps, streams[i].target_bitrate_bps);
+     RTC_DCHECK_GE(streams[i].max_qp, 0);
+ 
+diff --git a/webrtc/modules/video_coding/video_sender.cc b/webrtc/modules/video_coding/video_sender.cc
+index f60b687..4ddbfd0 100644
+--- a/webrtc/modules/video_coding/video_sender.cc
++++ b/webrtc/modules/video_coding/video_sender.cc
+@@ -37,7 +37,7 @@ VideoSender::VideoSender(Clock* clock,
+       post_encode_callback_(post_encode_callback),
+       send_stats_callback_(send_stats_callback),
+       _codecDataBase(&_encodedFrameCallback),
+-      frame_dropper_enabled_(true),
++      frame_dropper_enabled_(false),
+       _sendStatsTimer(VCMProcessTimer::kDefaultProcessIntervalMs, clock_),
+       current_codec_(),
+       encoder_params_({BitrateAllocation(), 0, 0, 0}),
+@@ -120,7 +120,7 @@ int32_t VideoSender::RegisterSendCodec(const VideoCodec* sendCodec,
+   } else if (frame_dropper_enabled_) {
+     _mediaOpt.EnableFrameDropper(true);
+   }
+-
++  _mediaOpt.EnableFrameDropper(false);
+   {
+     rtc::CritScope cs(&params_crit_);
+     next_frame_types_.clear();
+diff --git a/webrtc/pc/jsepsessiondescription.cc b/webrtc/pc/jsepsessiondescription.cc
+index 2e972ea..d701d70 100644
+--- a/webrtc/pc/jsepsessiondescription.cc
++++ b/webrtc/pc/jsepsessiondescription.cc
+@@ -110,8 +110,8 @@ const char SessionDescriptionInterface::kOffer[] = "offer";
+ const char SessionDescriptionInterface::kPrAnswer[] = "pranswer";
+ const char SessionDescriptionInterface::kAnswer[] = "answer";
+ 
+-const int JsepSessionDescription::kDefaultVideoCodecId = 100;
+-const char JsepSessionDescription::kDefaultVideoCodecName[] = "VP8";
++const int JsepSessionDescription::kDefaultVideoCodecId = 126;
++const char JsepSessionDescription::kDefaultVideoCodecName[] = "H264";
+ 
+ SessionDescriptionInterface* CreateSessionDescription(const std::string& type,
+                                                       const std::string& sdp,
